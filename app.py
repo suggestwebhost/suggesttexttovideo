@@ -51,6 +51,7 @@ def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[s
     return lines
 
 @app.post("/generate-video")
+@app.post("/generate-video"/)
 def generate_video(payload: VideoRequest):
     build_dir = os.path.abspath("temp_build")
     if os.path.exists(build_dir):
