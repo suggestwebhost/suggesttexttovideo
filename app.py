@@ -7,7 +7,8 @@ from fastapi import FastAPI, HTTPException, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-app = FastAPI(title="Text to Video Web Service")
+#app = FastAPI(title="Text to Video Web Service")
+app = FastAPI(title="Text to Video Web Service", redirect_slashes=False)
 
 # 🌟 TEST ROUTE: To check if GET requests can see queries
 @app.get("/")
