@@ -8,8 +8,15 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from PIL import Image, ImageDraw, ImageFont
 
+# 1. Initialize the FastAPI app object
 app = FastAPI(title="Text to Video Web Service")
 
+# 2. ADD THIS ROOT ROUTE FOR TESTING
+@app.get("/")
+def read_root():
+    return {"status": "Online", "message": "Go to /generate-video to post text"}
+
+# 3. Keep your Pydantic data model exactly the same
 class VideoRequest(BaseModel):
     text: str
     headline: Optional[str] = ""
@@ -17,6 +24,9 @@ class VideoRequest(BaseModel):
     duration_per_image: int = 3
     width: int = 1920
     height: int = 1080
+
+# ... keep the rest of your wrap_text and @app.post("/generate-video") logic exactly the same below ...
+
 
 def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
     """Correctly wraps text by calculating the true pixel width of strings."""
