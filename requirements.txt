@@ -3,3 +3,4 @@ uvicorn
 pillow
 pydantic
 requests
+python-multipart
