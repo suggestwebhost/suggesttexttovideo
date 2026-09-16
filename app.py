@@ -1,15 +1,16 @@
 import os
 import math
-import subprocess
+import asyncio
 import shutil
-from fastapi import FastAPI, HTTPException, Depends
+import uuid
+import gc
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from database import SessionLocal, VideoTask
 
 app = FastAPI(title="Database Backed Video Service")
 
-# Dependency to safely manage database connections
 def get_db():
     db = SessionLocal()
     try:
@@ -17,59 +18,83 @@ def get_db():
     finally:
         db.close()
 
+def remove_file(path: str):
+    if os.path.exists(path):
+        os.remove(path)
+
+# Define async endpoint to prevent thread pool starvation
 @app.get("/generate-by-id")
-def generate_by_id(task_id: str, db: Session = Depends(get_db)):
-    # 🌟 1. Fetch data directly from DB instead of request network travel
+async def generate_by_id(task_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Requested Task ID not found in DB.")
 
-    build_dir = os.path.join(os.getcwd(), "temp_build")
-    output_filename = os.path.join(os.getcwd(), "output.mp4")
+    unique_run_id = str(uuid.uuid4())
+    build_dir = os.path.join(os.getcwd(), f"temp_build_{unique_run_id}")
+    output_filename = os.path.join(os.getcwd(), f"output_{unique_run_id}.mp4")
     
-    if os.path.exists(build_dir): shutil.rmtree(build_dir)
     os.makedirs(build_dir, exist_ok=True)
-    if os.path.exists(output_filename): os.remove(output_filename)
 
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw
         words = task.text.split()
         if not words:
             raise HTTPException(status_code=400, detail="Database record text block is empty.")
 
-        # 2. Build your slide images
         words_per_image = math.ceil(len(words) / task.num_images)
+        
+        # 1. Memory Leak Fix: Explicitly manage Image lifecycles using context managers
         for i in range(task.num_images):
-            img = Image.new("RGB", (1920, 1080), color=(30, 30, 30))
-            draw = ImageDraw.Draw(img)
-            
-            start_idx = i * words_per_image
-            chunk_text = " ".join(words[start_idx : start_idx + words_per_image])
-            
-            draw.text((100, 100), task.headline, fill=(255, 215, 0))
-            draw.text((100, 500), chunk_text, fill=(255, 255, 255))
-            img.save(os.path.join(build_dir, f"frame_{i:03d}.png"))
+            with Image.new("RGB", (1920, 1080), color=(30, 30, 30)) as img:
+                draw = ImageDraw.Draw(img)
+                
+                start_idx = i * words_per_image
+                chunk_text = " ".join(words[start_idx : start_idx + words_per_image])
+                
+                draw.text((100, 100), task.headline, fill=(255, 215, 0))
+                draw.text((100, 500), chunk_text, fill=(255, 255, 255))
+                
+                img.save(os.path.join(build_dir, f"frame_{i:03d}.png"))
+        
+        # Force Python's garbage collector to free unused image allocations immediately
+        gc.collect()
 
-        # 3. Compile the frames into video using FFmpeg
+        # 2. Event Loop Fix: Non-blocking asynchronous FFmpeg execution
         input_pattern = os.path.join(build_dir, "frame_%03d.png")
-        ffmpeg_cmd = [
+        
+        # Create the sub-process asynchronously
+        process = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y",
             "-framerate", f"1/{task.duration_per_image}",
             "-i", input_pattern,
             "-c:v", "libx264",
             "-r", "30",
             "-pix_fmt", "yuv420p",
-            output_filename
-        ]
+            output_filename,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
         
-        result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if result.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"FFmpeg Error: {result.stderr}")
+        # Await the process completion without blocking other incoming API requests
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"FFmpeg Error: {stderr.decode().strip()}")
 
-        return FileResponse(output_filename, media_type="video/mp4", filename="output.mp4")
+        background_tasks.add_task(remove_file, output_filename)
+
+        return FileResponse(
+            path=output_filename, 
+            media_type="video/mp4", 
+            filename=f"video_{task_id}.mp4"
+        )
 
     except Exception as e:
-        if isinstance(e, HTTPException): raise e
+        if os.path.exists(output_filename): 
+            os.remove(output_filename)
+        if isinstance(e, HTTPException): 
+            raise e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if os.path.exists(build_dir): shutil.rmtree(build_dir)
+        if os.path.exists(build_dir): 
+            shutil.rmtree(build_dir)
